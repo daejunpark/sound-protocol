@@ -300,31 +300,11 @@ contract SuperMinterV1_1 is ISuperMinterV1_1, EIP712 {
         }
     }
 
-    /**
-     * @inheritdoc ISuperMinterV1_1
-     */
-    function mintTo(MintTo calldata p) public payable {
-        MintData storage d = _getMintData(LibOps.packId(p.edition, p.tier, p.scheduleNum));
-
-        /* ------------------- CHECKS AND UPDATES ------------------- */
-
-        // Check if the mint is open.
-        if (LibOps.or(block.timestamp < d.startTime, block.timestamp > d.endTime))
-            revert MintNotOpen(block.timestamp, d.startTime, d.endTime);
-        if (_isPaused(d)) revert MintPaused(); // Check if the mint is not paused.
-
-        // Perform the sub workflows depending on the mint mode.
-        uint8 mode = d.mode;
-        if (mode == VERIFY_MERKLE) _verifyMerkle(d, p);
-        else if (mode == VERIFY_SIGNATURE) _verifyAndClaimSignature(d, p);
-
-        _incrementMinted(mode, d, p);
-
-        /* ----------------- COMPUTE AND ACCRUE FEES ---------------- */
-
-        TotalPriceAndFees memory f = _totalPriceAndFees(p.tier, d, p.quantity, p.signedPrice);
-        MintedLogData memory l;
-
+    function _computeAndAccrueFees(
+        MintTo calldata p,
+        MintData storage d,
+        TotalPriceAndFees memory f
+    ) internal returns (MintedLogData memory l) {
         // The following block can use unchecked math, but we'll leave it as checked math
         // for more safety redundancy. Burns about few hundred gas more.
         //
@@ -380,6 +360,32 @@ contract SuperMinterV1_1 is ISuperMinterV1_1, EIP712 {
 
             platformFeesAccrued[d.platform] += l.finalPlatformFee; // Accrue the platform fee.
         }
+    }
+
+    /**
+     * @inheritdoc ISuperMinterV1_1
+     */
+    function mintTo(MintTo calldata p) public payable {
+        MintData storage d = _getMintData(LibOps.packId(p.edition, p.tier, p.scheduleNum));
+
+        /* ------------------- CHECKS AND UPDATES ------------------- */
+
+        // Check if the mint is open.
+        if (LibOps.or(block.timestamp < d.startTime, block.timestamp > d.endTime))
+            revert MintNotOpen(block.timestamp, d.startTime, d.endTime);
+        if (_isPaused(d)) revert MintPaused(); // Check if the mint is not paused.
+
+        // Perform the sub workflows depending on the mint mode.
+        uint8 mode = d.mode;
+        if (mode == VERIFY_MERKLE) _verifyMerkle(d, p);
+        else if (mode == VERIFY_SIGNATURE) _verifyAndClaimSignature(d, p);
+
+        _incrementMinted(mode, d, p);
+
+        /* ----------------- COMPUTE AND ACCRUE FEES ---------------- */
+
+        TotalPriceAndFees memory f = _totalPriceAndFees(p.tier, d, p.quantity, p.signedPrice);
+        MintedLogData memory l = _computeAndAccrueFees(p, d, f);
 
         /* ------------------------- MINT --------------------------- */
 
@@ -1121,24 +1127,31 @@ contract SuperMinterV1_1 is ISuperMinterV1_1, EIP712 {
             // The artist will receive the remaining after all BPS fees are deducted from sub total.
             // The minter will have to pay the sub total plus any flat fees.
             f.subTotal = unitPrice * uint256(quantity);
+            assert(quantity == 0 || uint(f.subTotal) / uint(quantity) == uint(unitPrice));
             // Sum the total flat fees for mints, and the transaction flat fee.
             f.platformTxFlatFee = c.perTxFlat;
             f.platformMintFlatFee = c.perMintFlat * uint256(quantity);
+            assert(quantity == 0 || uint(f.platformMintFlatFee) / uint(quantity) == uint(c.perMintFlat));
             f.platformFlatFee = f.platformMintFlatFee + f.platformTxFlatFee;
+            assert(uint(f.platformFlatFee) >= uint(f.platformMintFlatFee));
             // BPS fees are to be deducted from the sub total.
             f.platformMintBPSFee = LibOps.rawMulDiv(f.subTotal, c.perMintBPS, BPS_DENOMINATOR);
             // The platform fee includes BPS fees deducted from sub total,
             // and flat fees added to sub total.
             f.platformFee = f.platformMintBPSFee + f.platformFlatFee;
+            assert(uint(f.platformFee) >= uint(f.platformMintBPSFee));
             // Affiliate fee is to be deducted from the sub total.
             // Will be conditionally set to zero during mint if not affiliated.
             f.affiliateFee = LibOps.rawMulDiv(f.subTotal, d.affiliateFeeBPS, BPS_DENOMINATOR);
             // Calculate the incentives. These may be redirected away from the `platformFee`.
             f.affiliateIncentive = c.affiliateIncentive * uint256(quantity);
             f.cheapMintIncentive = c.cheapMintIncentive * uint256(quantity);
+            assert(quantity == 0 || uint(f.affiliateIncentive) / uint(quantity) == uint(c.affiliateIncentive));
+            assert(quantity == 0 || uint(f.cheapMintIncentive) / uint(quantity) == uint(c.cheapMintIncentive));
             f.cheapMintIncentiveThreshold = c.cheapMintIncentiveThreshold;
             // The total is the final value which the minter has to pay. It includes all fees.
             f.total = f.subTotal + f.platformFlatFee;
+            assert(uint(f.total) >= uint(f.subTotal));
         }
     }
 
